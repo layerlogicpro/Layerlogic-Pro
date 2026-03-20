@@ -210,8 +210,8 @@
 
   <div class="field">
     <label>Vent Hose Outer Diameter</label>
-    <input type="number" id="ventDia" value="99.5" step="0.1">
-    <div class="unit-hint" id="u_ventDia">mm &nbsp;|&nbsp; measure OD of your flexible hose</div>
+    <input type="number" id="ventDia" value="93.8" step="0.1">
+    <div class="unit-hint" id="u_ventDia">mm &nbsp;|&nbsp; measure the <strong>valley OD</strong> of your hose (across the grooves, not the peaks) — collar is a spigot, hose slides over and clamps down</div>
   </div>
   <button class="diagram-toggle" onclick="toggleDiag('d_hose')">▶ HOW TO MEASURE</button>
   <div class="diagram-box" id="d_hose">
@@ -344,9 +344,612 @@
 
   <div style="background:#1a2a4a;border-top:1px solid #2a4a8a;padding:20px 40px;font-family:'IBM Plex Mono',monospace;font-size:10px;color:#a0b8d8;line-height:1.8;">
     <div style="color:#60a0e0;letter-spacing:3px;font-size:9px;margin-bottom:8px;">COPYRIGHT NOTICE</div>
-    <div>© LayerLogic Pro — CC Window Vent System. All rights reserved.</div>
+    <div>&copy; LayerLogic Pro &mdash; Window Vent System. All rights reserved.</div>
     <div style="margin-top:6px;">This tool and its generated STL files are provided for personal, non-commercial use only. Redistribution, resale, or modification of generated files for commercial purposes is prohibited without express written permission from LayerLogic Pro.</div>
     <div style="margin-top:6px;">STL generation occurs entirely in your browser. No data is transmitted or stored. Compatible with all 3D printers.</div>
   </div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script>
+// ─── BINARY STL WRITER ───────────────────────────────────────────────────────
+function stlBuf(tris) {
+  const buf = new ArrayBuffer(84 + tris.length * 50);
+  const v = new DataView(buf);
+  for (let i = 0; i < 80; i++) v.setUint8(i, 0);
+  v.setUint32(80, tris.length, true);
+  let o = 84;
+  for (const [a, b, c] of tris) {
+    const ax=b[0]-a[0],ay=b[1]-a[1],az=b[2]-a[2];
+    const bx=c[0]-a[0],by=c[1]-a[1],bz=c[2]-a[2];
+    const nx=ay*bz-az*by,ny=az*bx-ax*bz,nz=ax*by-ay*bx;
+    const l=Math.sqrt(nx*nx+ny*ny+nz*nz)||1;
+    v.setFloat32(o,nx/l,true);o+=4;
+    v.setFloat32(o,ny/l,true);o+=4;
+    v.setFloat32(o,nz/l,true);o+=4;
+    for (const pt of [a,b,c]) {
+      v.setFloat32(o,pt[0],true);o+=4;
+      v.setFloat32(o,pt[1],true);o+=4;
+      v.setFloat32(o,pt[2],true);o+=4;
+    }
+    v.setUint16(o,0,true);o+=2;
+  }
+  return buf;
+}
+
+// Push a quad as 2 triangles (CCW winding from outside)
+function pq(t,a,b,c,d) { t.push([a,b,c],[a,c,d]); }
+
+// Solid box — 6 faces, fully closed
+// IMPORTANT: We only use solid geometry. The slicer applies walls + infill.
+function pbox(t,x0,y0,z0,x1,y1,z1) {
+  pq(t,[x0,y0,z0],[x1,y0,z0],[x1,y1,z0],[x0,y1,z0]); // bottom -Z
+  pq(t,[x0,y0,z1],[x0,y1,z1],[x1,y1,z1],[x1,y0,z1]); // top +Z
+  pq(t,[x0,y0,z0],[x0,y0,z1],[x1,y0,z1],[x1,y0,z0]); // front -Y
+  pq(t,[x0,y1,z0],[x1,y1,z0],[x1,y1,z1],[x0,y1,z1]); // back +Y
+  pq(t,[x0,y0,z0],[x0,y1,z0],[x0,y1,z1],[x0,y0,z1]); // left -X
+  pq(t,[x1,y0,z0],[x1,y0,z1],[x1,y1,z1],[x1,y1,z0]); // right +X
+}
+
+// Y-axis cylinder (hollow annulus, for vent collar/bore)
+function ycyl(t, cx, cz, y0, y1, rIn, rOut, S) {
+  S = S || 64;
+  for (let i = 0; i < S; i++) {
+    const a0=2*Math.PI*i/S, a1=2*Math.PI*(i+1)/S;
+    const ox0=cx+rOut*Math.cos(a0),oz0=cz+rOut*Math.sin(a0);
+    const ox1=cx+rOut*Math.cos(a1),oz1=cz+rOut*Math.sin(a1);
+    const ix0=cx+rIn*Math.cos(a0), iz0=cz+rIn*Math.sin(a0);
+    const ix1=cx+rIn*Math.cos(a1), iz1=cz+rIn*Math.sin(a1);
+    pq(t,[ox0,y0,oz0],[ox0,y1,oz0],[ox1,y1,oz1],[ox1,y0,oz1]); // outer wall
+    pq(t,[ix0,y0,iz0],[ix1,y0,iz1],[ix1,y1,iz1],[ix0,y1,iz0]); // inner wall (reversed)
+    pq(t,[ix0,y0,iz0],[ox0,y0,oz0],[ox1,y0,oz1],[ix1,y0,iz1]); // front annulus
+    pq(t,[ix0,y1,iz0],[ix1,y1,iz1],[ox1,y1,oz1],[ox0,y1,oz0]); // back annulus
+  }
+}
+
+// ─── DIMS ────────────────────────────────────────────────────────────────────
+function getDims(p) {
+  return {
+    by:  p.body_y    || 45,
+    bz:  p.body_z    || 163,
+    tw:  p.top_wall  || 3.175,
+    td:  p.top_depth || 6.35,
+    bw:  p.bis_w     || 6.3,
+    bh:  p.bis_h     || 6.3,
+    bd:  p.bis_dep   || 10,
+    sz1: p.sock_z1   || 138,
+    sz2: p.sock_z2   || 20,
+    syc: p.sock_y_c  || 22.5,
+    tabY:  p.ch_width  || 8.5,
+    tabIns: 22,
+  };
+}
+
+// ─── SOLID PANEL (slicer handles walls + infill) ──────────────────────────────
+// Main body is a solid box. Top U-channel walls added on top.
+// Biscuit sockets are solid protrusions (slicer sees them as extensions of body).
+// Bottom tabs are solid protrusions.
+// No hollow shells — no double walls — no infill issues.
+
+// Build an X-axis face (fixed xVal) as a rectangle with rectangular holes.
+// Face spans y0..y1, z0..z1. holes: [{x0,z0,x1,z1}] in (y,z) coords.
+// outward: +1 = normal toward +X, -1 = toward -X
+function buildFaceWithRectHoles(t, xVal, y0, z0, y1, z1, holes, outward) {
+  // Scanline in Z, then Y per strip
+  const zPts = [z0];
+  for (const h of holes) { zPts.push(h.z0, h.z1); }
+  zPts.push(z1);
+  const zBreaks = [...new Set(zPts)].sort((a,b)=>a-b);
+
+  for (let zi = 0; zi < zBreaks.length-1; zi++) {
+    const za = zBreaks[zi], zb = zBreaks[zi+1];
+    if (za >= zb) continue;
+    // Holes active in this Z band
+    const activeH = holes.filter(h => h.z0 <= za && h.z1 >= zb);
+    const yPts = [y0];
+    for (const h of activeH) { yPts.push(h.x0, h.x1); }
+    yPts.push(y1);
+    const yBreaks = [...new Set(yPts)].sort((a,b)=>a-b);
+    for (let yi = 0; yi < yBreaks.length-1; yi++) {
+      const ya = yBreaks[yi], yb = yBreaks[yi+1];
+      if (ya >= yb) continue;
+      // Skip if inside a hole
+      if (activeH.some(h => h.x0 <= ya && h.x1 >= yb)) continue;
+      // Vertex: [xVal, y, z]
+      if (outward > 0) {
+        pq(t,[xVal,ya,za],[xVal,ya,zb],[xVal,yb,zb],[xVal,yb,za]);
+      } else {
+        pq(t,[xVal,ya,za],[xVal,yb,za],[xVal,yb,zb],[xVal,ya,zb]);
+      }
+    }
+  }
+}
+
+function solidBody(t, len, p) {
+  const {by,bz,tw,td,bw,bh,bd,sz1,sz2,syc} = getDims(p);
+  // Main solid body — all faces EXCEPT left (X=0) and right (X=len)
+  // which are built with socket pocket openings.
+
+  // Bottom -Z
+  pq(t,[0,0,0],[len,0,0],[len,by,0],[0,by,0]);
+  // Top +Z
+  pq(t,[0,0,bz],[0,by,bz],[len,by,bz],[len,0,bz]);
+  // Front -Y
+  pq(t,[0,0,0],[0,0,bz],[len,0,bz],[len,0,0]);
+  // Back +Y
+  pq(t,[0,by,0],[len,by,0],[len,by,bz],[0,by,bz]);
+
+  // Socket pocket openings on left (X=0) and right (X=len) faces
+  // Holes: {x0,z0,x1,z1} in face coords (y=panel_depth axis, z=height axis)
+  const sockHoles = [sz1, sz2].map(sz => ({
+    x0: syc - bw/2, x1: syc + bw/2,
+    z0: sz  - bh/2, z1: sz  + bh/2,
+  }));
+
+  // Left face X=0, normal -X (outward=-1 in X direction)
+  // face coords: y=0..by, z=0..bz
+  buildFaceWithRectHoles(t, 0, 0, 0, by, bz, sockHoles, -1);
+  // Right face X=len, normal +X (outward=+1)
+  buildFaceWithRectHoles(t, len, 0, 0, by, bz, sockHoles, +1);
+
+  // Top U-channel walls
+  pbox(t, 0, 0, bz, len, tw, bz+td);
+  pbox(t, 0, by-tw, bz, len, by, bz+td);
+}
+
+// Biscuit socket: recessed pocket cut into the panel face.
+// Face is at X=xFace. Pocket dims: bw(Y) x bh(Z) x bd(X deep).
+function addSocks(t, len, p, faces) {
+  const {by,bz,bw,bh,bd,sz1,sz2,syc} = getDims(p);
+  const addPocket = (xFace, dir) => {
+    for (const sz of [sz1, sz2]) {
+      const y0 = syc - bw/2, y1 = syc + bw/2;
+      const z0 = sz  - bh/2, z1 = sz  + bh/2;
+      const xi = xFace + dir * bd; // inner back wall X
+      // Bottom wall z=z0, normal -Z
+      pq(t,[xFace,y0,z0],[xFace,y1,z0],[xi,y1,z0],[xi,y0,z0]);
+      // Top wall z=z1, normal +Z
+      pq(t,[xFace,y0,z1],[xi,y0,z1],[xi,y1,z1],[xFace,y1,z1]);
+      // Front wall y=y0, normal -Y
+      pq(t,[xFace,y0,z0],[xi,y0,z0],[xi,y0,z1],[xFace,y0,z1]);
+      // Back wall y=y1, normal +Y
+      pq(t,[xFace,y1,z0],[xFace,y1,z1],[xi,y1,z1],[xi,y1,z0]);
+      // Inner back wall (end of pocket)
+      if (dir > 0) {
+        // pocket goes in +X dir, back wall normal is -X (faces outward toward X=0)
+        pq(t,[xi,y0,z0],[xi,y0,z1],[xi,y1,z1],[xi,y1,z0]);
+      } else {
+        // pocket goes in -X dir, back wall normal is +X
+        pq(t,[xi,y0,z0],[xi,y1,z0],[xi,y1,z1],[xi,y0,z1]);
+      }
+    }
+  };
+  if (faces==='left'||faces==='both')  addPocket(0,   1);
+  if (faces==='right'||faces==='both') addPocket(len, -1);
+}
+
+function addBtabs2(t, len, p) {
+  const {tabIns} = getDims(p);
+  const by = p.body_y || 45;
+  const thick = p.tab_thick || 27.5;
+  const ty0 = (by - thick) / 2;
+  const ty1 = ty0 + thick;
+  pbox(t, 15,       ty0, -tabIns, 15+50.8,   ty1, 0);
+  pbox(t, len-65.8, ty0, -tabIns, len-15,    ty1, 0);
+}
+
+function addBtab1(t, len, p) {
+  const {tabIns} = getDims(p);
+  const by = p.body_y || 45;
+  const thick = p.tab_thick || 27.5;
+  const ty0 = (by - thick) / 2;
+  const ty1 = ty0 + thick;
+  const cx = (len - 50.8) / 2;
+  pbox(t, cx, ty0, -tabIns, cx+50.8, ty1, 0);
+}
+
+// ─── PARTS ───────────────────────────────────────────────────────────────────
+
+function buildEndCap(p, side) {
+  const {by,bz,tw,td} = getDims(p);
+  const len = p.cap_len || 76.2;
+  const t = [];
+  solidBody(t, len, p);
+  // Side tab: solid protrusion from end face
+  const ty0=(by-(p.tab_thick||27.5))/2, ty1=ty0+(p.tab_thick||27.5);
+  const tz0=bz*0.3, tz1=bz*0.8;
+  const tl = p.tab_len||22;
+  if (side==='left')  pbox(t,-tl,ty0,tz0,0,ty1,tz1);
+  else                pbox(t,len,ty0,tz0,len+tl,ty1,tz1);
+  addSocks(t, len, p, side==='left'?'right':'left');
+  addBtab1(t, len, p);
+  return stlBuf(t);
+}
+
+function buildMiddlePanel(len, p) {
+  const t = [];
+  solidBody(t, len, p);
+  addSocks(t, len, p, 'both');
+  addBtabs2(t, len, p);
+  return stlBuf(t);
+}
+
+function buildVentPanel(p) {
+  const {by,bz,tw,td} = getDims(p);
+  const len = p.vent_len || 152.4;
+  const rV  = (p.vent_d||93.8)/2;
+  const rL  = (p.lip_d||97.8)/2;
+  const ll  = p.lip_len||20;
+  const cx  = len/2, cz = bz/2;
+  const S   = 64;
+  const t   = [];
+
+  // Build Y-axis face with circular hole using quadrant fan.
+  // Same ring points as bore wall → exact shared edges → watertight mesh.
+  // outward: -1 = normal toward -Y (front face), +1 = toward +Y (back face)
+  function faceWithHole(y, x0, z0, x1, z1, hx, hz, rH, S, outward) {
+    // Generate ring — SAME points as bore wall cylinder
+    const ring = [];
+    for (let i = 0; i < S; i++) {
+      const a = 2*Math.PI*i/S;
+      ring.push([hx + rH*Math.cos(a), hz + rH*Math.sin(a)]);
+    }
+
+    // Rect corners: 0=BL(x0,z0) 1=BR(x1,z0) 2=TR(x1,z1) 3=TL(x0,z1)
+    const corners = [[x0,z0],[x1,z0],[x1,z1],[x0,z1]];
+
+    // Assign each ring point to nearest corner
+    const quadrant = ring.map(([rx,rz]) => {
+      let best = 0, bestD = Infinity;
+      corners.forEach(([cx2,cz2], i) => {
+        const d = (rx-cx2)**2 + (rz-cz2)**2;
+        if (d < bestD) { bestD = d; best = i; }
+      });
+      return best;
+    });
+
+    // Fan triangles: corner → ring[i] → ring[i+1] for each quadrant
+    for (let c = 0; c < 4; c++) {
+      const [cx2,cz2] = corners[c];
+      const indices = [];
+      for (let i = 0; i < S; i++) if (quadrant[i] === c) indices.push(i);
+      if (indices.length === 0) continue;
+      for (let k = 0; k < indices.length - 1; k++) {
+        const [rx0,rz0] = ring[indices[k]];
+        const [rx1,rz1] = ring[indices[k+1]];
+        if (outward > 0) {
+          t.push([[cx2,y,cz2],[rx0,y,rz0],[rx1,y,rz1]]);
+        } else {
+          t.push([[cx2,y,cz2],[rx1,y,rz1],[rx0,y,rz0]]);
+        }
+      }
+    }
+
+    // Bridging quads between adjacent corner fans
+    for (let c = 0; c < 4; c++) {
+      const c2 = (c+1) % 4;
+      const [cx1_,cz1_] = corners[c];
+      const [cx2_,cz2_] = corners[c2];
+      const idxC  = []; for (let i=0;i<S;i++) if(quadrant[i]===c)  idxC.push(i);
+      const idxC2 = []; for (let i=0;i<S;i++) if(quadrant[i]===c2) idxC2.push(i);
+      if (idxC.length === 0 || idxC2.length === 0) continue;
+      const [rx0,rz0] = ring[idxC[idxC.length-1]];
+      const [rx1,rz1] = ring[idxC2[0]];
+      if (outward > 0) {
+        pq(t,[cx1_,y,cz1_],[rx0,y,rz0],[rx1,y,rz1],[cx2_,y,cz2_]);
+      } else {
+        pq(t,[cx1_,y,cz1_],[cx2_,y,cz2_],[rx1,y,rz1],[rx0,y,rz0]);
+      }
+    }
+  }
+
+  // Body: 4 closed sides (no front/back — replaced with holed faces)
+  // Bottom -Z
+  pq(t,[0,0,0],[len,0,0],[len,by,0],[0,by,0]);
+  // Top +Z (body only)
+  pq(t,[0,0,bz],[0,by,bz],[len,by,bz],[len,0,bz]);
+
+  // Left -X and Right +X faces: built with socket pocket openings
+  const {bw,bh,bd,sz1,sz2,syc} = getDims(p);
+  const sockHoles = [sz1, sz2].map(sz => ({
+    x0: syc - bw/2, x1: syc + bw/2,
+    z0: sz  - bh/2, z1: sz  + bh/2,
+  }));
+  buildFaceWithRectHoles(t, 0,   0, 0, by, bz, sockHoles, -1);
+  buildFaceWithRectHoles(t, len, 0, 0, by, bz, sockHoles, +1);
+
+  // Front face Y=0 with hole, normal faces -Y (outward=-1)
+  faceWithHole(0, 0, 0, len, bz, cx, cz, rV, S, -1);
+
+  // Back face Y=by with hole, normal faces +Y (outward=+1)
+  faceWithHole(by, 0, 0, len, bz, cx, cz, rV, S, +1);
+
+  // Inner bore wall Y=0 to Y=by
+  for (let i = 0; i < S; i++) {
+    const a0=2*Math.PI*i/S, a1=2*Math.PI*(i+1)/S;
+    const hx0=cx+rV*Math.cos(a0), hz0=cz+rV*Math.sin(a0);
+    const hx1=cx+rV*Math.cos(a1), hz1=cz+rV*Math.sin(a1);
+    // Inner wall faces inward (toward bore center)
+    pq(t,[hx1,0,hz1],[hx1,by,hz1],[hx0,by,hz0],[hx0,0,hz0]);
+  }
+
+  // Top U-channel walls
+  pbox(t, 0, 0,    bz, len, tw,    bz+td);
+  pbox(t, 0, by-tw,bz, len, by,    bz+td);
+
+  // Collar: hollow annulus protruding from front face (-Y direction)
+  ycyl(t, cx, cz, -ll, 0, rV, rL, S);
+
+  addSocks(t, len, p, 'both');
+  addBtabs2(t, len, p);
+  return stlBuf(t);
+}
+
+function buildBiscuitTab(p) {
+  const bw=p.bis_w||6.3, bh=p.bis_h||6.3;
+  const t = [];
+  pbox(t, 0, 0, 0, 20, bw, bh);
+  return stlBuf(t);
+}
+
+function buildVentCap(p) {
+  const rIn = ((p.lip_d||97.8)+0.8)/2;
+  const rOut = rIn + 3;
+  const depth = 15, faceT = 3;
+  const t = [];
+  ycyl(t, 0, 0, 0, depth, rIn, rOut, 64);
+  // Face plate solid disk
+  for (let i=0;i<64;i++) {
+    const a0=2*Math.PI*i/64, a1=2*Math.PI*(i+1)/64;
+    t.push([[0,depth,0],[rOut*Math.cos(a0),depth,rOut*Math.sin(a0)],[rOut*Math.cos(a1),depth,rOut*Math.sin(a1)]]);
+    t.push([[0,depth+faceT,0],[rOut*Math.cos(a1),depth+faceT,rOut*Math.sin(a1)],[rOut*Math.cos(a0),depth+faceT,rOut*Math.sin(a0)]]);
+    pq(t,[rOut*Math.cos(a0),depth,rOut*Math.sin(a0)],[rOut*Math.cos(a0),depth+faceT,rOut*Math.sin(a0)],[rOut*Math.cos(a1),depth+faceT,rOut*Math.sin(a1)],[rOut*Math.cos(a1),depth,rOut*Math.sin(a1)]);
+  }
+  return stlBuf(t);
+}
+
+function buildMeshInsert(p, cs) {
+  cs = cs || 3;
+  const rPress = (p.vent_d||93.8)/2 - 0.3;
+  const rIn = rPress - 2, lipD = 4, faceT = 1.2, ribT = 1.2;
+  const t = [];
+  ycyl(t, 0, 0, 0, lipD, rIn, rPress, 64);
+  const step=cs+ribT, rr=rIn-1;
+  for (let x=-rr;x<=rr;x+=step) {
+    const ye=Math.sqrt(Math.max(0,rr*rr-x*x)); if(ye<1)continue;
+    pbox(t,x-ribT/2,lipD,-ye,x+ribT/2,lipD+faceT,ye);
+  }
+  for (let z=-rr;z<=rr;z+=step) {
+    const xe=Math.sqrt(Math.max(0,rr*rr-z*z)); if(xe<1)continue;
+    pbox(t,-xe,lipD,z-ribT/2,xe,lipD+faceT,z+ribT/2);
+  }
+  return stlBuf(t);
+}
+
+function buildLouvreInsert(p, gap, angle) {
+  gap=gap||3; const ang=(angle||45)*Math.PI/180;
+  const rPress=(p.vent_d||93.8)/2-0.3;
+  const rIn=rPress-2, lipD=4, slatT=1.5;
+  const t=[];
+  ycyl(t,0,0,0,lipD,rIn,rPress,64);
+  const step=gap+slatT, rr=rIn-1;
+  for (let z=-rr;z<=rr;z+=step) {
+    const xe=Math.sqrt(Math.max(0,rr*rr-z*z)); if(xe<1)continue;
+    pbox(t,-xe,lipD,z,xe,lipD+slatT,z+slatT);
+  }
+  return stlBuf(t);
+}
+
+// ─── MAIN GENERATE ───────────────────────────────────────────────────────────
+function generateSTLs(params) {
+  const p = params;
+  const files = [];
+  files.push({name:'01_left_end_cap.stl',  buf: buildEndCap(p,'left')});
+  files.push({name:'06_right_end_cap.stl', buf: buildEndCap(p,'right')});
+  files.push({name:'02_vent_panel.stl',    buf: buildVentPanel(p)});
+  const maxLen=p.bed_length-(p.bed_margin||6)*2;
+  const fixed=(p.cap_len||76.2)*2+(p.vent_len||152.4)*p.num_vents;
+  const middleTotal=p.window_width-fixed;
+  const nMid=Math.ceil(middleTotal/maxLen);
+  const midLen=middleTotal/nMid;
+  for (let i=0;i<nMid;i++) {
+    files.push({name:'0'+(3+i)+'_middle_panel_'+String.fromCharCode(65+i)+'.stl', buf:buildMiddlePanel(midLen,p)});
+  }
+  if (p.num_vents===1) {
+    files.push({name:'07_blank_vent_panel.stl', buf:buildMiddlePanel(p.vent_len||152.4,p)});
+  }
+  files.push({name:'08_biscuit_tab.stl', buf:buildBiscuitTab(p)});
+  files.push({name:'09_vent_cap.stl',    buf:buildVentCap(p)});
+  if (p.insert_type==='mesh')   files.push({name:'10_vent_insert_mesh.stl',    buf:buildMeshInsert(p,p.insert_size)});
+  if (p.insert_type==='louvre') files.push({name:'11_vent_insert_louvres.stl', buf:buildLouvreInsert(p,p.insert_size,p.louvre_angle)});
+  return files;
+}
+
+
+// ─── UI FUNCTIONS ────────────────────────────────────────────────────────────
+let numVents = 1;
+let insertType = 'none';
+
+function toggleDiag(id) {
+  const el = document.getElementById(id);
+  const btn = el.previousElementSibling;
+  el.classList.toggle('open');
+  btn.textContent = el.classList.contains('open') ? btn.textContent.replace('▶','▼') : btn.textContent.replace('▼','▶');
+}
+
+let currentUnit = 'mm';
+const FIELDS = {
+  windowWidth:  { mm: 850.9,  label_mm: 'mm | measure inside channel to inside channel', label_in: 'inches' },
+  channelWidth: { mm: 28.15,  label_mm: 'mm | default 28.15mm', label_in: 'inches | default 1.108"' },
+  ledgeWidth:   { mm: 8.02,   label_mm: 'mm | default 8.02mm',  label_in: 'inches | default 0.316"' },
+  frameHeight:  { mm: 163,    label_mm: 'mm | default 163mm',   label_in: 'inches | default 6.417"' },
+  panelDepth:   { mm: 45,     label_mm: 'mm | default 45mm',    label_in: 'inches | default 1.772"' },
+  ventDia:      { mm: 93.8,   label_mm: 'mm | valley OD of hose (hose slides over collar, clamp to secure)', label_in: 'inches' },
+  bedLength:    { mm: 256,    label_mm: 'mm | your printer bed length', label_in: 'inches' },
+  bedMargin:    { mm: 6,      label_mm: 'mm | clearance from bed edge', label_in: 'inches' },
+  capLen:       { mm: 76.2,   label_mm: 'mm | default 76.2mm (3")', label_in: 'inches | default 3"' },
+  ventLen:      { mm: 152.4,  label_mm: 'mm | default 152.4mm (6")', label_in: 'inches | default 6"' },
+};
+
+function setUnit(unit) {
+  const wasIn = currentUnit==='in', nowIn = unit==='in';
+  currentUnit = unit;
+  document.getElementById('btnMM').classList.toggle('active', unit==='mm');
+  document.getElementById('btnIN').classList.toggle('active', unit==='in');
+  Object.keys(FIELDS).forEach(id => {
+    const inp = document.getElementById(id);
+    const hint = document.getElementById('u_'+id);
+    const f = FIELDS[id];
+    if(!inp) return;
+    const cur = parseFloat(inp.value);
+    if(wasIn&&!nowIn){ inp.value=(cur*25.4).toFixed(2); inp.step=0.1; }
+    else if(!wasIn&&nowIn){ inp.value=(cur/25.4).toFixed(4); inp.step=0.001; }
+    if(hint) hint.textContent = nowIn ? f.label_in : f.label_mm;
+  });
+}
+
+function getVal(id) {
+  const v = parseFloat(document.getElementById(id).value);
+  return currentUnit==='in' ? v*25.4 : v;
+}
+
+function setVents(n) {
+  numVents = n;
+  document.getElementById('vent1btn').classList.toggle('active', n===1);
+  document.getElementById('vent2btn').classList.toggle('active', n===2);
+}
+
+function setInsert(type) {
+  insertType = type;
+  ['None','Mesh','Louver'].forEach(x=>document.getElementById('insert'+x+'Btn')?.classList.toggle('active',type===x.toLowerCase()));
+  const opts = document.getElementById('insertOptions');
+  if(opts) opts.style.display = (type==='none')?'none':'block';
+  const lf = document.getElementById('louverAngleField');
+  if(lf) lf.style.display = (type==='louvre')?'block':'none';
+  const sl = document.getElementById('insertSizeLabel');
+  if(sl) sl.textContent = type==='mesh'?'Mesh Cell Size':'Gap Between Louvres';
+}
+
+function mm(v){ return parseFloat(v).toFixed(2); }
+function inch(v){ return (parseFloat(v)/25.4).toFixed(3); }
+
+function generate() {
+  const windowWidth = getVal('windowWidth');
+  const bedLength   = getVal('bedLength');
+  const bedMargin   = parseFloat(document.getElementById('bedMargin').value)||6;
+  const capLen      = getVal('capLen');
+  const ventLen     = getVal('ventLen');
+  const ventDia     = getVal('ventDia');
+  const frameHeight = getVal('frameHeight');
+  const panelDepth  = getVal('panelDepth');
+  const channelWidth= getVal('channelWidth');
+
+  const maxLen = bedLength - bedMargin*2;
+  const fixed  = capLen*2 + ventLen*numVents;
+  const middleTotal = windowWidth - fixed;
+
+  if(middleTotal<=0){
+    document.getElementById('content').innerHTML=`<div class="warning">⚠ Window too narrow. Fixed pieces = ${mm(fixed)}mm but window = ${mm(windowWidth)}mm.</div>`;
+    return;
+  }
+
+  const nMid = Math.ceil(middleTotal/maxLen);
+  const midLen = middleTotal/nMid;
+  const biscuits = (2 + numVents + nMid + (numVents===1?1:0))*2; // joints × 2 sockets
+
+  const params = {
+    window_width: windowWidth, body_y: panelDepth, body_z: frameHeight,
+    ch_width: channelWidth, ch_depth:5, ch_wall:18.25,
+    top_wall:3.175, top_depth:6.35,
+    cap_len: capLen, vent_len: ventLen, vent_d: ventDia,
+    lip_d: ventDia+4.0, lip_len:20,  // collar outer = spigot OD + 4mm (2mm wall)
+    bis_w:6.3, bis_h:6.3, bis_dep:10, boss_t:2.5,
+    sock_z1: frameHeight-25, sock_z2:20, sock_y_c: panelDepth/2,
+    tab_len:15.5, tab_thick:27.5,
+    bed_length: bedLength, bed_margin: bedMargin,
+    num_vents: numVents,
+    insert_type: insertType,
+    insert_size: parseFloat(document.getElementById('insertSize')?.value||3),
+    louvre_angle: parseFloat(document.getElementById('louverAngle')?.value||45),
+  };
+
+  const btn = document.getElementById('genBtn');
+  btn.disabled = true; btn.textContent = 'GENERATING...';
+
+  setTimeout(()=>{
+    try {
+      const files = generateSTLs(params);
+      const biscuitCount = biscuits+6;
+
+      let filesHTML = '<div class="files-grid">';
+      files.forEach(f=>{
+        const type = f.name.includes('cap')&&!f.name.includes('vent_cap')?'cap':f.name.includes('vent_panel')?'vent':f.name.includes('middle')||f.name.includes('blank')?'middle':f.name.includes('biscuit')?'biscuit':'cap';
+        filesHTML += `<div class="file-card">
+          <div class="file-icon">◼</div>
+          <div style="flex:1">
+            <div class="file-name">${f.name}</div>
+            <div class="file-dim">${(f.buf.byteLength/1024).toFixed(1)} KB</div>
+          </div>
+          <button onclick="dlFile('${f.name}')" style="background:var(--accent);color:#fff;border:none;padding:6px 12px;font-family:var(--mono);font-size:10px;letter-spacing:1px;cursor:pointer;">DL</button>
+        </div>`;
+      });
+      filesHTML += '</div>';
+
+      window._stlFiles = files;
+
+      document.getElementById('content').innerHTML = `
+        <div class="results-grid">
+          <div class="result-card"><div class="ct">Total width</div><div class="cn">${mm(windowWidth)}</div><div class="cu">mm | ${inch(windowWidth)}"</div></div>
+          <div class="result-card"><div class="ct">Middle panels</div><div class="cn">${nMid}</div><div class="cu">× ${mm(midLen)}mm each</div></div>
+          <div class="result-card"><div class="ct">Biscuit tabs</div><div class="cn">${biscuits}</div><div class="cu">print ${biscuitCount} for spares</div></div>
+          <div class="result-card"><div class="ct">Files generated</div><div class="cn">${files.length}</div><div class="cu">STL files ready</div></div>
+        </div>
+        <button class="download-all" onclick="dlAll()">⬇ DOWNLOAD ALL AS ZIP</button>
+        ${filesHTML}
+        <div class="instructions">
+          <h3>Print settings</h3>
+          <ol>
+            <li>Material: ASA or PETG recommended. ABS with enclosure. PLA last resort.</li>
+            <li>Layer height: 0.28mm · Walls: 3 · Infill: 6% Cubic · Infill line width: 0.7mm</li>
+            <li>Supports: None required · Brim: recommended for ASA/ABS</li>
+            <li>Print biscuit tabs first — test fit before printing all panels.</li>
+            <li>Print one end cap — test tab slides into vertical window channel.</li>
+            <li>Bottom tabs drop into window sill channel — panels stand plumb.</li>
+            <li>Lower window into top U-channel across all panels once assembled.</li>
+            <li>Attach hose to vent collar and tighten hose clamp.</li>
+          </ol>
+        </div>
+        <div class="scale-note" style="font-family:var(--mono);font-size:11px;color:var(--muted);border-left:3px solid var(--accent);padding:12px 16px;margin-top:16px;">
+          ✓ STL files are generated to your exact measurements — no scaling needed in slicer.<br>
+          ✓ Open each STL directly in your slicer and print at 100% scale.
+        </div>`;
+
+    } catch(e){
+      document.getElementById('content').innerHTML=`<div class="warning">⚠ Error generating files: ${e.message}</div>`;
+    }
+    btn.disabled=false; btn.textContent='GENERATE STL FILES';
+  },50);
+}
+
+function dlFile(name){
+  const f = window._stlFiles?.find(x=>x.name===name);
+  if(!f) return;
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([f.buf],{type:'application/octet-stream'}));
+  a.download=name; a.click();
+}
+
+async function dlAll(){
+  const files = window._stlFiles;
+  if(!files||!files.length) return;
+  const zip = new JSZip();
+  files.forEach(f=>zip.file(f.name, f.buf));
+  const blob = await zip.generateAsync({type:'blob'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='LayerLogicPro_WindowVent.zip';
+  a.click();
+}
+</script>
+
 </body>
 </html>
